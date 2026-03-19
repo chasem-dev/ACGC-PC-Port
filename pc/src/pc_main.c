@@ -17,6 +17,7 @@ SDL_Window*   g_pc_window = NULL;
 SDL_GLContext  g_pc_gl_context = NULL;
 int           g_pc_running = 1;
 int           g_pc_no_framelimit = 0;
+int           g_pc_fast_forward = 0;
 int           g_pc_verbose = 0;
 int           g_pc_time_override = -1; /* -1=system clock, 0-23=override hour */
 int           g_pc_window_w = PC_SCREEN_WIDTH;
@@ -209,6 +210,30 @@ void pc_platform_update_window_size(void) {
 }
 
 void pc_platform_swap_buffers(void) {
+    /* One-time pixel color diagnostic */
+    {
+        static int diag_frame = 0;
+        if (diag_frame >= 180 && diag_frame < 185) {
+            u8 px[4];
+            int cx = g_pc_window_w / 2, cy = g_pc_window_h / 2;
+            /* Sample center, and 5 points around the character area */
+            struct { int x, y; const char* label; } pts[] = {
+                {cx, cy, "center"},
+                {cx, cy + 50, "char_body"},
+                {cx - 30, cy + 30, "char_left"},
+                {cx + 30, cy + 30, "char_right"},
+                {cx, cy - 80, "above"},
+                {50, 50, "top_left"},
+            };
+            fprintf(stderr, "[PIXEL] frame=%d:", diag_frame);
+            for (int i = 0; i < 6; i++) {
+                glReadPixels(pts[i].x, g_pc_window_h - pts[i].y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                fprintf(stderr, " %s=(%d,%d,%d,%d)", pts[i].label, px[0], px[1], px[2], px[3]);
+            }
+            fprintf(stderr, "\n");
+        }
+        diag_frame++;
+    }
     SDL_GL_SwapWindow(g_pc_window);
 }
 

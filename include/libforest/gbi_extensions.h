@@ -11,7 +11,11 @@ extern "C" {
 
 #ifndef _GBI_STATIC_PTR
 #ifdef TARGET_PC
+#if UINTPTR_MAX > 0xFFFFFFFFu
+#define _GBI_STATIC_PTR(s) (uintptr_t)(s)
+#else
 #define _GBI_STATIC_PTR(s) (unsigned int)(uintptr_t)(s)
+#endif
 #else
 #define _GBI_STATIC_PTR(s) (unsigned int)(s)
 #endif
