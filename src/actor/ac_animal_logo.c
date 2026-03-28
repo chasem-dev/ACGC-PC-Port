@@ -143,6 +143,14 @@ static void aAL_actor_dt(ACTOR* actor, GAME* game) {
 static void aAL_title_game_data_init_start_select(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   GAME_PLAY* play = (GAME_PLAY*)game;
 
+#ifdef TARGET_PC
+  /* Reload save from disk; the title demo mutated save data in RAM.
+   * On GC the memory card is re-read; on PC re-read the GCI file. */
+  if (pc_save_loaded) {
+    pc_save_reload();
+  }
+#endif
+
   play->fb_fade_type = FADE_TYPE_SELECT;
   play->fb_wipe_type = WIPE_TYPE_FADE_BLACK;
   Common_Set(transition.wipe_type, WIPE_TYPE_FADE_BLACK);
@@ -472,7 +480,11 @@ static void aAL_setupAction(ANIMAL_LOGO_ACTOR* actor, GAME* game, int action) {
     &aAL_logo_in,
     &aAL_back_fadein,
     &aAL_start_key_chk_start_wait,
+#ifdef PC_ENHANCEMENTS
+    (ANIMAL_LOGO_ACTION_PROC)&aAL_pc_game_start_wait,
+#else
     &aAL_game_start_wait,
+#endif
     &aAL_fade_out_start_wait,
     (ANIMAL_LOGO_ACTION_PROC)&none_proc1,
     (ANIMAL_LOGO_ACTION_PROC)&none_proc1
@@ -1036,10 +1048,10 @@ static void aAL_actor_draw(ACTOR* actor, GAME* game) {
       case aAL_ACTION_GAME_START:
       case aAL_ACTION_FADE_OUT_START:
       case aAL_ACTION_OUT:
-        aAL_press_start_draw(logo_actor, graph);
 #ifdef PC_ENHANCEMENTS
-        /* TODO: polygon font rendering for PC menu needs further work;
-           use original press_start_draw (texture rectangles) for now */
+        aAL_pc_menu_draw(logo_actor, game);
+#else
+        aAL_press_start_draw(logo_actor, graph);
 #endif
         break;
     }

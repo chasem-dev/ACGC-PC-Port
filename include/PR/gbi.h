@@ -1159,12 +1159,12 @@ typedef struct {
  * First 8 words are integer portion of the 4x4 matrix
  * Last 8 words are the fraction portion of the 4x4 matrix
  */
-typedef long	Mtx_t[4][4];
+typedef s32_compat	Mtx_t[4][4];
 
 typedef union {
     Mtx_t		m;
     long long int	force_structure_alignment;
-} Mtx;
+} Mtx ATTRIBUTE_ALIGN(8);
 
 /*
  * Viewport
@@ -1209,7 +1209,7 @@ typedef struct {
 typedef union {
     Vp_t		vp;
     long long int	force_structure_alignment;
-} Vp;
+} Vp ATTRIBUTE_ALIGN(8);
 
 /*
  * MOVEMEM indices
@@ -1389,12 +1389,12 @@ typedef struct {
 typedef union {
     Light_t	l;
     long long int	force_structure_alignment[2];
-} Light;
+} Light ATTRIBUTE_ALIGN(8);
 
 typedef union {
     Ambient_t	l;
     long long int	force_structure_alignment[1];
-} Ambient;
+} Ambient ATTRIBUTE_ALIGN(8);
 
 typedef struct {
     Ambient	a;
@@ -1447,8 +1447,8 @@ typedef struct {
 
 typedef union {
     Hilite_t	h;
-    long int	force_structure_alignment[4];
-} Hilite;
+    long long int	force_structure_alignment[2];
+} Hilite ATTRIBUTE_ALIGN(8);
 
 #define gdSPDefLights0(ar,ag,ab)					\
 		{ 	{{ {ar,ag,ab},0,{ar,ag,ab},0}},			\
@@ -1712,7 +1712,7 @@ typedef struct {
 		unsigned int	prim_min_level:8;
 		unsigned int	pad:8;
 		int		cmd:8;
-		unsigned long	color;
+		u32_compat	color;
 } Gsetcolor;
 #else
 typedef struct {
@@ -1720,7 +1720,7 @@ typedef struct {
 		unsigned char	pad;
 		unsigned char	prim_min_level;
 		unsigned char	prim_level;
-		unsigned long	color;
+		u32_compat	color;
 } Gsetcolor;
 #endif
 
@@ -1859,10 +1859,10 @@ typedef struct {
  * Textured rectangles are 128 bits not 64 bits
  */	
 typedef struct {
-    unsigned long w0;
-    unsigned long w1;
-    unsigned long w2;
-    unsigned long w3;
+    u32_compat w0;
+    u32_compat w1;
+    u32_compat w2;
+    u32_compat w3;
 } TexRect;
 
 /*
@@ -1909,7 +1909,7 @@ typedef union {
 	Gsettilesize	settilesize;
 	Gloadtlut	loadtlut;
         long long int	force_structure_alignment;
-} Gfx;
+} Gfx ATTRIBUTE_ALIGN(8);
 
 /* GBI_FIXUP_PTR is no longer needed — _GBI_STATIC_PTR now stores full pointers
  * on 64-bit via uintptr_t w1. Kept as no-op for compatibility. */

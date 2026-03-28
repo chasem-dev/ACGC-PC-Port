@@ -9,6 +9,10 @@
 extern "C" uintptr_t pc_image_base;
 extern "C" uintptr_t pc_image_end;
 
+/* Arena range from pc_os.c — heap pointers in arena also bypass segment resolution */
+extern "C" unsigned char* pc_arena_base;
+extern "C" unsigned char* pc_arena_end;
+
 #if UINTPTR_MAX > 0xFFFFFFFFu
 #include "pc_gbi_ptr.h"
 
@@ -26,6 +30,18 @@ uintptr_t emu64::seg2k0(uintptr_t segadr) {
     if (segadr > 0xFFFFFFFFu) return segadr;
     /* Zero — can't recover */
     if (segadr == 0) return 0;
+
+    /* If the address is within the executable image, it's a native pointer */
+    if (segadr >= pc_image_base && segadr < pc_image_end) {
+        return segadr;
+    }
+
+    /* Check if address falls within the main memory arena (JKRHeap, Object_Exchange
+       banks, cloth data, etc.).*/
+    if (pc_arena_base && segadr >= (uintptr_t)pc_arena_base &&
+        segadr < (uintptr_t)pc_arena_end) {
+        return segadr;
+    }
 
     /* Try N64 segment resolution first (0x03-0x0F range) */
     if (segadr >= 0x03000000u && segadr <= 0x0FFFFFFFu) {
@@ -50,31 +66,64 @@ uintptr_t emu64::seg2k0(uintptr_t segadr) {
     return segadr;
 }
 #else
-/* === 32-bit seg2k0 (Windows) ===
+/* === 32-bit seg2k0 ===
  * On 32-bit, PC pointers can collide with N64 segment addresses (both in
- * 0x03-0x0F range). Use VirtualQuery + page cache to disambiguate. */
+ * 0x03-0x0F range). On Windows/Linux, use VirtualQuery/mincore + page cache to
+ * disambiguate. On other platforms, rely on segment table and image range. */
 
+#if defined(_WIN32) || defined(__linux__)
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <errno.h>
+#include <unistd.h>
+#endif
+
+/* Page-granularity cache for VirtualQuery/mincore results.
+ * Avoids repeated syscalls for addresses in the same page. */
 #define SEG2K0_PAGE_CACHE_SIZE 32
 static struct { u32 page; u8 committed; } seg2k0_page_cache[SEG2K0_PAGE_CACHE_SIZE];
 static int seg2k0_cache_next = 0;
 
 static int seg2k0_is_committed(u32 addr) {
-    u32 page = addr & ~0xFFF;
+    static long page_size = 0;
+    if (page_size == 0) {
+#ifdef _WIN32
+        page_size = 4096;
+#else
+        page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) page_size = 4096;
+#endif
+    }
+    u32 page = addr & ~(u32)(page_size - 1);
     for (int i = 0; i < SEG2K0_PAGE_CACHE_SIZE; i++) {
         if (seg2k0_page_cache[i].page == page) {
             return seg2k0_page_cache[i].committed;
         }
     }
-    MEMORY_BASIC_INFORMATION mbi;
     int committed = 0;
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION mbi;
     if (VirtualQuery((void*)(uintptr_t)addr, &mbi, sizeof(mbi)) > 0 && mbi.State == MEM_COMMIT) {
         committed = 1;
     }
+#else
+    /* Linux: use mincore to check if the page is mapped.
+     * mincore(2) returns 0 on success, and sets vec[0] to indicate if the page is resident.
+     * If the address is not mapped, it returns -1 with errno=ENOMEM. */
+    unsigned char vec[1];
+    if (mincore((void*)(uintptr_t)page, (size_t)page_size, vec) == 0) {
+        committed = 1;
+    } else if (errno != ENOMEM) {
+        /* Other error (e.g. invalid pointer) — assume not committed */
+        committed = 0;
+    }
+#endif
     seg2k0_page_cache[seg2k0_cache_next].page = page;
-    seg2k0_page_cache[seg2k0_cache_next].committed = committed;
+    seg2k0_page_cache[seg2k0_cache_next].committed = (u8)committed;
     seg2k0_cache_next = (seg2k0_cache_next + 1) % SEG2K0_PAGE_CACHE_SIZE;
-    return committed;
+    return (int)committed;
 }
+#endif /* _WIN32 || __linux__ */
 
 uintptr_t emu64::seg2k0(uintptr_t segadr) {
     if ((segadr >> 28) != 0 || segadr < 0x03000000) {
@@ -82,6 +131,13 @@ uintptr_t emu64::seg2k0(uintptr_t segadr) {
     }
 
     if (segadr >= pc_image_base && segadr < pc_image_end) {
+        return segadr;
+    }
+
+    /* Check if address falls within the main memory arena (JKRHeap, Object_Exchange
+       banks, cloth data, etc.).*/
+    if (pc_arena_base && segadr >= (u32)(uintptr_t)pc_arena_base &&
+        segadr < (u32)(uintptr_t)pc_arena_end) {
         return segadr;
     }
 
@@ -94,7 +150,25 @@ uintptr_t emu64::seg2k0(uintptr_t segadr) {
 
     uintptr_t resolved = this->segments[seg] + offset;
 
+#if defined(_WIN32) || defined(__linux__)
+    /* Real N64 segment addresses come from GBI macros like SEGMENT_ADDR(seg, offset)
+       and always have small offsets (textures, matrices that are never > 512KB).
+       PC heap pointers that collide with the segment range have large "offsets"
+       (the low 24 bits of an arbitrary address). Use this to discriminate:
+       large offset + committed raw address = heap pointer, not segment ref.
+
+       This might be the last memory fix needed.
+       */
+
+    /* Large offset (> 512KB) with committed raw address = definitely a heap pointer,
+       not a real segment reference. N64 segments never have offsets this large. */
+    if (offset > 0x80000 && seg2k0_is_committed(segadr)) {
+        return segadr;
+    }
+
+    /* Normal segment resolution path */
     if (seg2k0_is_committed((u32)resolved)) {
+        /* Segment resolution gave a valid address — use it (normal path) */
         this->resolved_addresses++;
         return resolved;
     }
@@ -102,6 +176,7 @@ uintptr_t emu64::seg2k0(uintptr_t segadr) {
     if (seg2k0_is_committed((u32)segadr)) {
         return segadr;
     }
+#endif /* _WIN32 || __linux__ */
 
     this->resolved_addresses++;
     return resolved;

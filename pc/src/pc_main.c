@@ -9,6 +9,7 @@
 #include "pc_keybindings.h"
 #include "pc_assets.h"
 #include "pc_disc.h"
+#include "pc_typing.h"
 
 /* prefer discrete GPU on laptops */
 #ifdef _WIN32
@@ -23,11 +24,13 @@ int           g_pc_no_framelimit = 0;
 int           g_pc_fast_forward = 0;
 int           g_pc_verbose = 0;
 int           g_pc_time_override = -1; /* -1=system clock, 0-23=override hour */
+int           g_pc_min_override = -1; /* -1=system clock, 0-59=override minute */
+int           g_pc_sec_override = -1; /* -1=system clock, 0-59=override second */
 int           g_pc_window_w = PC_SCREEN_WIDTH;
 int           g_pc_window_h = PC_SCREEN_HEIGHT;
 int           g_pc_widescreen_stretch = 0;
 
-/* exe image range — used by seg2k0 to distinguish pointers from segment addresses */
+/* exe image range -- used by seg2k0 to distinguish pointers from segment addresses */
 uintptr_t pc_image_base = 0;
 uintptr_t pc_image_end  = 0;
 
@@ -107,7 +110,6 @@ uintptr_t pc_crash_get_addr(void) {
 void pc_platform_init(void) {
 #ifdef _WIN32
     SetProcessDPIAware();
-
 #endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -121,6 +123,7 @@ void pc_platform_init(void) {
     /* macOS requires forward-compatible flag for Core Profile contexts */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #endif
+    SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 #ifdef PC_ENHANCEMENTS
@@ -166,6 +169,36 @@ void pc_platform_init(void) {
         SDL_Quit();
         exit(1);
     }
+
+    if (g_pc_verbose) {
+        const char* vendor = (const char*)glGetString(GL_VENDOR);
+        const char* renderer = (const char*)glGetString(GL_RENDERER);
+        const char* version = (const char*)glGetString(GL_VERSION);
+        const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+        printf("[GL] Vendor: %s\n", vendor ? vendor : "Unknown");
+        printf("[GL] Renderer: %s\n", renderer ? renderer : "Unknown");
+        printf("[GL] Version: %s\n", version ? version : "Unknown");
+        printf("[GL] GLSL: %s\n", glsl ? glsl : "Unknown");
+        const char* sdl_driver = SDL_GetCurrentVideoDriver();
+        printf("[SDL] Video Driver: %s\n", sdl_driver ? sdl_driver : "Unknown");
+    }
+
+#ifndef _WIN32
+    {
+        const char* renderer = (const char*)glGetString(GL_RENDERER);
+        if (renderer && (strstr(renderer, "llvmpipe") || strstr(renderer, "softpipe"))) {
+            const char* sdl_driver = SDL_GetCurrentVideoDriver();
+            fprintf(stderr, "\n--- WARNING ---\n"
+                            "Game is running on software renderer (llvmpipe/softpipe).\n"
+                            "This likely means 32-bit graphics drivers are missing on your system.\n");
+            if (sdl_driver && strcmp(sdl_driver, "wayland") == 0) {
+                fprintf(stderr, "On Wayland, ensure you have lib32-egl-wayland installed.\n"
+                                "Alternatively, try running with: SDL_VIDEODRIVER=x11\n");
+            }
+            fprintf(stderr, "----------------\n\n");
+        }
+    }
+#endif
 
     SDL_GL_SetSwapInterval(g_pc_settings.vsync);
 
@@ -258,6 +291,9 @@ static int pc_confirm_quit(void) {
 
 int pc_platform_poll_events(void) {
     SDL_Event event;
+
+    pc_typing_update();
+
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_QUIT:
@@ -286,6 +322,10 @@ int pc_platform_poll_events(void) {
                     g_pc_fast_forward ^= 1;
                     printf("[PC] Fast forward %s (2x)\n", g_pc_fast_forward ? "ON" : "OFF");
                 }
+                pc_typing_handle_event(&event);
+                break;
+            case SDL_TEXTINPUT:
+                pc_typing_handle_event(&event);
                 break;
         }
     }
@@ -297,13 +337,41 @@ extern void ac_entry(void);
 extern int boot_main(int argc, const char** argv);
 
 int main(int argc, char* argv[]) {
+#ifndef _WIN32
+    /* prefer discrete GPU on Linux (NVIDIA PRIME and AMD) while respecting user overrides */
+    setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 0);
+    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+    setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 0);
+    setenv("DRI_PRIME", "1", 0);
+
+    const char* wayland_display = getenv("WAYLAND_DISPLAY");
+    const char* x11_display = getenv("DISPLAY");
+
+#if UINTPTR_MAX <= 0xFFFFFFFFu
+    /* On 32-bit Linux, Wayland/EGL often fails to load discrete drivers (lib32-nvidia-utils).
+     * We default to X11 (XWayland) for stability, but allow user override via SDL_VIDEODRIVER. */
+    if (wayland_display != NULL && x11_display != NULL) {
+        setenv("SDL_VIDEODRIVER", "x11", 0);
+    }
+#endif
+
+    const char* sdl_vid_drv = getenv("SDL_VIDEODRIVER");
+    if (sdl_vid_drv != NULL && strcmp(sdl_vid_drv, "x11") == 0) {
+        /* prefer GLX on X11 to prevent EGL fallback issues on some discrete drivers */
+        setenv("SDL_VIDEO_GL_DRIVER", "libGL.so.1", 0);
+    } else if (sdl_vid_drv == NULL && x11_display != NULL && wayland_display == NULL) {
+        /* No driver set, and only X11 is available - safe to prefer GLX */
+        setenv("SDL_VIDEO_GL_DRIVER", "libGL.so.1", 0);
+    }
+#endif
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: AnimalCrossing [options]\n");
             printf("  --verbose, -v       Enable diagnostic output\n");
             printf("  --no-framelimit     Disable frame limiter\n");
             printf("  --model-viewer [N]  Launch model viewer (optional start index)\n");
-            printf("  --time HOUR         Override in-game hour (0-23)\n");
+            printf("  --time H[:M[:S]]    Override in-game time (e.g. 5, 17:30, 5:55:00)\n");
             printf("  --help, -h          Show this help message\n");
             return 0;
         } else if (strcmp(argv[i], "--no-framelimit") == 0) {
@@ -317,8 +385,11 @@ int main(int argc, char* argv[]) {
                 i++;
             }
         } else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
-            g_pc_time_override = atoi(argv[i + 1]);
-            if (g_pc_time_override < 0 || g_pc_time_override > 23) g_pc_time_override = -1;
+            int h = -1, m = -1, s = -1;
+            sscanf(argv[i + 1], "%d:%d:%d", &h, &m, &s);
+            if (h >= 0 && h <= 23) g_pc_time_override = h;
+            if (m >= 0 && m <= 59) g_pc_min_override = m;
+            if (s >= 0 && s <= 59) g_pc_sec_override = s;
             i++;
         }
     }
